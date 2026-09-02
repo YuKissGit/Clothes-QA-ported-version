@@ -1,6 +1,6 @@
 # Clothing Quality Inspection
 
-A fully offline desktop application for Windows and macOS. It requires no network connection or server deployment. Batches, cartons, UPCs, and inspection records are stored in a local SQLite database. Exception images are stored in the application's local data directory.
+A fully offline desktop application for macOS. It requires no network connection or server deployment. Batches, cartons, UPCs, and inspection records are stored in a local SQLite database. Exception images are stored in the application's local data directory.
 
 ## Business Rules
 
@@ -50,7 +50,7 @@ Build an installer:
 npm run tauri build
 ```
 
-Windows installers must be built on Windows, and macOS packages must be built on macOS. Images are limited to JPG, JPEG, and PNG.
+macOS packages must be built on macOS. Images are limited to JPG, JPEG, and PNG.
 
 ## Local Data
 

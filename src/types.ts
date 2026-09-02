@@ -77,5 +77,7 @@ export interface RecordEditInput {
 export interface ReplaceCartonRecordsInput {
   batchId: number;
   cartonId: number;
+  inspector: string;
+  replaceExisting: boolean;
   records: RecordEditInput[];
 }

@@ -116,6 +116,8 @@ pub struct RecordEditInput {
 pub struct ReplaceCartonRecordsInput {
     pub batch_id: i64,
     pub carton_id: i64,
+    pub inspector: String,
+    pub replace_existing: bool,
     pub records: Vec<RecordEditInput>,
 }
 

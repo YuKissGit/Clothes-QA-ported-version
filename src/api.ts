@@ -36,6 +36,8 @@ export const api = {
     invoke<number>("create_record", { input }),
   replaceCartonRecords: (input: ReplaceCartonRecordsInput) =>
     invoke<void>("replace_carton_records", { input }),
+  listRecordPhotos: (recordId: number) =>
+    invoke<PhotoInput[]>("list_record_photos", { recordId }),
   completeCarton: (id: number) => invoke<void>("complete_carton", { id }),
   reopenCarton: (id: number) => invoke<void>("reopen_carton", { id }),
   readClipboardFileImage: () =>

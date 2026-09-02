@@ -79,6 +79,10 @@ fn replace_carton_records(
     result(db.lock().unwrap().replace_carton_records(input))
 }
 #[tauri::command]
+fn list_record_photos(db: State<AppDb>, record_id: i64) -> Result<Vec<PhotoInput>, String> {
+    result(db.lock().unwrap().photo_inputs_for_record(record_id))
+}
+#[tauri::command]
 fn complete_carton(db: State<AppDb>, id: i64) -> Result<(), String> {
     result(db.lock().unwrap().complete_carton(id))
 }
@@ -369,6 +373,7 @@ pub fn run() {
             list_records,
             create_record,
             replace_carton_records,
+            list_record_photos,
             complete_carton,
             reopen_carton,
             read_clipboard_file_image,

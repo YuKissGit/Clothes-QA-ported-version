@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { api } from "./api";
 import { open, save } from "@tauri-apps/plugin-dialog";
-import { readImage } from "@tauri-apps/plugin-clipboard-manager";
+import { readImage, writeText } from "@tauri-apps/plugin-clipboard-manager";
 import type {
   Batch,
   Carton,
@@ -266,6 +266,8 @@ function App() {
                   });
                 }}
                 onClick={async () => {
+                  setRecords([]);
+                  setProducts([]);
                   setCarton(c);
                   const [nextRecords, nextProducts] = await Promise.all([
                     api.listRecords(batch.id, c.id),
@@ -383,12 +385,20 @@ type DraftRow = {
   exceptionReason: string;
   photos: PhotoInput[];
 };
-const newDraft = (): DraftRow => ({
+const defaultReason = (grade: Grade) =>
+  grade === "A" ? "吊牌无价格" : grade === "B" ? "吊牌有价格" : "";
+const newDraft = (grade: Grade): DraftRow => ({
   id: Date.now() + Math.random(),
   barcode: "",
   quantity: 1,
-  exceptionReason: "",
+  exceptionReason: defaultReason(grade),
   photos: [],
+});
+const emptyDrafts = (): Record<Grade, DraftRow[]> => ({
+  A: [newDraft("A")],
+  B: [newDraft("B")],
+  C: [newDraft("C")],
+  D: [newDraft("D")],
 });
 
 function CartonView({
@@ -406,15 +416,14 @@ function CartonView({
   refresh: () => Promise<void>;
   notify: (v: string) => void;
 }) {
-  const [drafts, setDrafts] = useState<Record<Grade, DraftRow[]>>({
-    A: [newDraft()],
-    B: [newDraft()],
-    C: [newDraft()],
-    D: [newDraft()],
-  });
+  const [drafts, setDrafts] = useState<Record<Grade, DraftRow[]>>(emptyDrafts);
   const [editingExisting, setEditingExisting] = useState(false);
   const [selectedUpc, setSelectedUpc] = useState<string | null>(null);
   const [inspectorDraft, setInspectorDraft] = useState(carton.inspector);
+  const soleBarcode = useMemo(() => {
+    const unique = [...new Set(products.map((product) => product.upc.trim()).filter(Boolean))];
+    return unique.length === 1 ? unique[0] : "";
+  }, [products]);
   const stats = useMemo(
     () => [
       ["A", carton.gradeA],
@@ -425,6 +434,10 @@ function CartonView({
     [carton],
   );
   useEffect(() => setSelectedUpc(null), [carton.id]);
+  useEffect(() => {
+    setDrafts(emptyDrafts());
+    setEditingExisting(false);
+  }, [carton.id]);
   useEffect(() => setInspectorDraft(carton.inspector), [
     carton.id,
     carton.inspector,
@@ -441,14 +454,20 @@ function CartonView({
         row.id === id ? { ...row, ...patch } : row,
       ),
     }));
-  const add = (grade: Grade) =>
-    setDrafts((v) => ({ ...v, [grade]: [...v[grade], newDraft()] }));
+  const add = (grade: Grade, count: number) =>
+    setDrafts((v) => ({
+      ...v,
+      [grade]: [
+        ...v[grade],
+        ...Array.from({ length: count }, () => newDraft(grade)),
+      ],
+    }));
   const remove = (grade: Grade, id: number) =>
     setDrafts((v) => ({
       ...v,
       [grade]:
         v[grade].length === 1
-          ? [newDraft()]
+          ? [newDraft(grade)]
           : v[grade].filter((row) => row.id !== id),
     }));
   const addPhotoInputs = (grade: Grade, id: number, photos: PhotoInput[]) =>
@@ -463,7 +482,11 @@ function CartonView({
         ...current,
         [grade]: current[grade].map((item) =>
           item.id === id
-            ? { ...item, photos: [...item.photos, ...photos] }
+            ? {
+                ...item,
+                barcode: item.barcode.trim() ? item.barcode : soleBarcode,
+                photos: [...item.photos, ...photos],
+              }
             : item,
         ),
       };
@@ -498,45 +521,39 @@ function CartonView({
       .filter((r) => r.barcode.trim())
       .map((row) => ({ grade, row })),
   );
-  const beginEdit = () => {
-    const grouped = Object.fromEntries(
-      (["A", "B", "C", "D"] as Grade[]).map((grade) => {
+  const beginEdit = async () => {
+    try {
+      const photoGroups = await Promise.all(
+        records.map((record) => api.listRecordPhotos(record.id)),
+      );
+      const grouped = Object.fromEntries(
+        (["A", "B", "C", "D"] as Grade[]).map((grade) => {
         const rows = records
-          .filter((record) => record.grade === grade)
-          .map((record) => ({
+          .map((record, index) => ({ record, photos: photoGroups[index] }))
+          .filter(({ record }) => record.grade === grade)
+          .map(({ record, photos }) => ({
             id: Date.now() + Math.random(),
             recordId: record.id,
             barcode: record.barcode,
             quantity: record.quantity,
             exceptionReason: record.exceptionReason,
-            photos: [],
+            photos,
           }));
-        return [grade, rows.length ? rows : [newDraft()]];
+        return [grade, rows.length ? rows : [newDraft(grade)]];
       }),
-    ) as Record<Grade, DraftRow[]>;
-    setDrafts(grouped);
-    setEditingExisting(true);
-    requestAnimationFrame(() =>
-      document
-        .querySelector(".entry")
-        ?.scrollIntoView({ behavior: "smooth", block: "start" }),
-    );
+      ) as Record<Grade, DraftRow[]>;
+      setDrafts(grouped);
+      setEditingExisting(true);
+      requestAnimationFrame(() =>
+        document.querySelector(".entry")?.scrollIntoView({ behavior: "smooth", block: "start" }),
+      );
+    } catch (error) {
+      notify(`读取原有图片失败：${String(error)}`);
+    }
   };
   const cancelEdit = () => {
-    setDrafts({
-      A: [newDraft()],
-      B: [newDraft()],
-      C: [newDraft()],
-      D: [newDraft()],
-    });
+    setDrafts(emptyDrafts());
     setEditingExisting(false);
-  };
-  const saveInspector = async () => {
-    const value = inspectorDraft.trim();
-    if (value === carton.inspector) return;
-    await api.updateCartonInspector(carton.id, value);
-    await refresh();
-    notify("质检人员已保存");
   };
   const saveAll = async () => {
     if (carton.status === "completed") {
@@ -568,11 +585,12 @@ function CartonView({
       return;
     }
     try {
-      if (editingExisting) {
-        await api.replaceCartonRecords({
-          batchId: batch.id,
-          cartonId: carton.id,
-          records: active.map(({ grade, row }) => ({
+      await api.replaceCartonRecords({
+        batchId: batch.id,
+        cartonId: carton.id,
+        inspector: inspectorDraft.trim(),
+        replaceExisting: editingExisting,
+        records: active.map(({ grade, row }) => ({
             id: row.recordId,
             barcode: row.barcode.trim(),
             grade,
@@ -580,26 +598,8 @@ function CartonView({
             exceptionReason: row.exceptionReason.trim(),
             photos: row.photos,
           })),
-        });
-      } else {
-        for (const { grade, row } of active) {
-          await api.createRecord({
-            batchId: batch.id,
-            cartonId: carton.id,
-            barcode: row.barcode.trim(),
-            grade,
-            quantity: row.quantity,
-            exceptionReason: row.exceptionReason.trim(),
-            photos: row.photos,
-          });
-        }
-      }
-      setDrafts({
-        A: [newDraft()],
-        B: [newDraft()],
-        C: [newDraft()],
-        D: [newDraft()],
       });
+      setDrafts(emptyDrafts());
       setEditingExisting(false);
       await refresh();
       notify(editingExisting ? "本箱修改已保存" : "保存成功");
@@ -627,21 +627,8 @@ function CartonView({
             <input
               value={inspectorDraft}
               onChange={(event) => setInspectorDraft(event.target.value)}
-              onBlur={() => saveInspector().catch((e) => notify(String(e)))}
-              onKeyDown={(event) => {
-                if (event.key === "Enter") {
-                  event.currentTarget.blur();
-                }
-              }}
               placeholder="输入质检人员"
             />
-            <button
-              disabled={inspectorDraft.trim() === carton.inspector}
-              onMouseDown={(event) => event.preventDefault()}
-              onClick={() => saveInspector().catch((e) => notify(String(e)))}
-            >
-              保存人员
-            </button>
           </span>
         </label>
         <div className="upc-list">
@@ -715,7 +702,8 @@ function CartonView({
               key={grade}
               grade={grade}
               rows={drafts[grade]}
-              add={() => add(grade)}
+              products={products}
+              add={(count) => add(grade, count)}
               remove={(id) => remove(grade, id)}
               update={(id, p) => update(grade, id, p)}
               addPhotos={(id, files) => addPhotos(grade, id, files)}
@@ -736,7 +724,7 @@ function CartonView({
               {carton.status !== "completed" && (
                 <button
                   disabled={!records.length || editingExisting}
-                  onClick={beginEdit}
+                  onClick={() => beginEdit()}
                 >
                   修改本箱
                 </button>
@@ -783,7 +771,9 @@ function CartonView({
                     )
                       return;
                     try {
-                      await saveInspector();
+                      if (inspector !== carton.inspector) {
+                        await api.updateCartonInspector(carton.id, inspector);
+                      }
                       await api.completeCarton(carton.id);
                       await refresh();
                       notify("本箱已完成");
@@ -868,6 +858,27 @@ function CartonView({
               </span>
             ))}
           </div>
+          <button
+            type="button"
+            className="copy-seal-summary"
+            onClick={async () => {
+              const parts = (["A", "B", "C"] as Grade[])
+                .map((grade) => [grade, carton[`grade${grade}` as keyof Carton]] as const)
+                .filter(([, count]) => Number(count) > 0)
+                .map(([grade, count]) => `${grade} ${count}件`);
+              let text = `${carton.cartonNo}箱封箱，共${carton.sealedQty}件`;
+              if (parts.length) text += `，其中${parts.join("，")}`;
+              if (carton.gradeD > 0) text += `，已取出${carton.gradeD}件D`;
+              try {
+                await writeText(text);
+                notify("封箱信息已复制");
+              } catch (error) {
+                notify(`复制失败：${String(error)}`);
+              }
+            }}
+          >
+            复制封箱信息
+          </button>
         </aside>
       </section>
     </>
@@ -877,6 +888,7 @@ function CartonView({
 function GradePanel({
   grade,
   rows,
+  products,
   add,
   remove,
   update,
@@ -884,11 +896,18 @@ function GradePanel({
 }: {
   grade: Grade;
   rows: DraftRow[];
-  add: () => void;
+  products: CartonProduct[];
+  add: (count: number) => void;
   remove: (id: number) => void;
   update: (id: number, p: Partial<DraftRow>) => void;
   addPhotos: (id: number, files: File[]) => void;
 }) {
+  const [addCount, setAddCount] = useState(1);
+  const [preview, setPreview] = useState<{ photos: PhotoInput[]; index: number } | null>(null);
+  const autoBarcode = useMemo(() => {
+    const unique = [...new Set(products.map((product) => product.upc.trim()).filter(Boolean))];
+    return unique.length === 1 ? unique[0] : "";
+  }, [products]);
   const [pasteMenu, setPasteMenu] = useState<{
     rowId: number;
     x: number;
@@ -911,6 +930,18 @@ function GradePanel({
       window.removeEventListener("keydown", escape);
     };
   }, [pasteMenu]);
+  useEffect(() => {
+    if (!preview) return;
+    const close = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setPreview(null);
+      if (event.key === "ArrowLeft")
+        setPreview((value) => value && ({ ...value, index: (value.index - 1 + value.photos.length) % value.photos.length }));
+      if (event.key === "ArrowRight")
+        setPreview((value) => value && ({ ...value, index: (value.index + 1) % value.photos.length }));
+    };
+    window.addEventListener("keydown", close);
+    return () => window.removeEventListener("keydown", close);
+  }, [preview]);
   const pasteFiles = (id: number, items: DataTransferItemList) => {
     const files = Array.from(items)
       .filter((item) => item.kind === "file" && item.type.startsWith("image/"))
@@ -997,12 +1028,24 @@ function GradePanel({
       <div className={`grade-panel panel-${grade}`}>
         <div className="grade-panel-title">
           <span className={`grade g${grade}`}>{grade}级</span>
+          <input
+            className="add-row-count"
+            type="number"
+            min="1"
+            max="100"
+            value={addCount}
+            aria-label={`${grade}级新增条数`}
+            onChange={(event) => setAddCount(Number(event.target.value))}
+          />
           <button
             className="add-row"
-            onClick={add}
-            title={`增加一行 ${grade} 级记录`}
+            onClick={() => {
+              if (!Number.isInteger(addCount) || addCount < 1 || addCount > 100) return;
+              add(addCount);
+            }}
+            title={`增加 ${addCount} 行 ${grade} 级记录`}
           >
-            ＋
+            ＋ 新增
           </button>
         </div>
         <div className="draft-head">
@@ -1015,11 +1058,19 @@ function GradePanel({
         {rows.map((row, index) => (
           <div className="draft-row" key={row.id}>
             <input
+              list={`upc-options-${grade}`}
               autoFocus={index === rows.length - 1 && rows.length > 1}
               value={row.barcode}
               onChange={(e) => update(row.id, { barcode: e.target.value })}
               placeholder="输入或扫码"
             />
+            {index === 0 && (
+              <datalist id={`upc-options-${grade}`}>
+                {[...new Set(products.map((product) => product.upc))].map((upc) => (
+                  <option value={upc} key={upc} />
+                ))}
+              </datalist>
+            )}
             <input
               type="number"
               min="1"
@@ -1031,15 +1082,18 @@ function GradePanel({
             />
             <input
               value={row.exceptionReason}
-              onChange={(e) =>
-                update(row.id, { exceptionReason: e.target.value })
-              }
+              onChange={(e) => {
+                const exceptionReason = e.target.value;
+                update(row.id, {
+                  exceptionReason,
+                  ...(exceptionReason.trim() && !row.barcode.trim() && autoBarcode
+                    ? { barcode: autoBarcode }
+                    : {}),
+                });
+              }}
               placeholder="输入条码后必填"
             />
-            {row.recordId ? (
-              <div className="drop-zone saved-photo-note">原有图片将保留</div>
-            ) : (
-              <div
+            <div
                 className="drop-zone photo-zone"
                 role="button"
                 tabIndex={0}
@@ -1094,6 +1148,11 @@ function GradePanel({
                           <img
                             src={`data:${photoMimeType(p.dataBase64)};base64,${p.dataBase64}`}
                             alt={p.name}
+                            onClick={(event) => {
+                              event.preventDefault();
+                              event.stopPropagation();
+                              setPreview({ photos: row.photos, index: i });
+                            }}
                           />
                           <button
                             type="button"
@@ -1114,8 +1173,7 @@ function GradePanel({
                       ? "选填：左键选择，右键粘贴"
                       : "输入条码后必填：左键选择，右键粘贴"}
                 </span>
-              </div>
-            )}
+            </div>
             <button
               className="danger remove-row"
               onClick={() => remove(row.id)}
@@ -1144,6 +1202,30 @@ function GradePanel({
             >
               粘贴图片
             </button>
+          </div>,
+          document.body,
+        )}
+      {preview &&
+        createPortal(
+          <div className="photo-lightbox" role="dialog" aria-modal="true" onClick={() => setPreview(null)}>
+            <button className="photo-lightbox-close" aria-label="关闭图片预览" onClick={() => setPreview(null)}>×</button>
+            {preview.photos.length > 1 && (
+              <button className="photo-lightbox-prev" aria-label="上一张" onClick={(event) => {
+                event.stopPropagation();
+                setPreview({ ...preview, index: (preview.index - 1 + preview.photos.length) % preview.photos.length });
+              }}>‹</button>
+            )}
+            <img
+              onClick={(event) => event.stopPropagation()}
+              src={`data:${photoMimeType(preview.photos[preview.index].dataBase64)};base64,${preview.photos[preview.index].dataBase64}`}
+              alt={preview.photos[preview.index].name}
+            />
+            {preview.photos.length > 1 && (
+              <button className="photo-lightbox-next" aria-label="下一张" onClick={(event) => {
+                event.stopPropagation();
+                setPreview({ ...preview, index: (preview.index + 1) % preview.photos.length });
+              }}>›</button>
+            )}
           </div>,
           document.body,
         )}

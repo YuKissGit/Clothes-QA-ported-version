@@ -292,6 +292,10 @@ impl Database {
     pub fn replace_carton_records(&mut self, input: ReplaceCartonRecordsInput) -> Result<()> {
         let tx = self.conn.transaction()?;
         ensure_carton(&tx, input.batch_id, input.carton_id)?;
+        tx.execute(
+            "UPDATE cartons SET inspector=? WHERE id=?",
+            params![input.inspector.trim(), input.carton_id],
+        )?;
         let existing_ids = tx
             .prepare("SELECT id FROM inspection_records WHERE carton_id=?")?
             .query_map([input.carton_id], |row| row.get::<_, i64>(0))?
@@ -328,9 +332,11 @@ impl Database {
         }
 
         let mut files_to_remove = Vec::new();
-        for id in existing_ids.difference(&retained_ids) {
-            files_to_remove.extend(photo_paths_for_record(&tx, *id)?);
-            tx.execute("DELETE FROM inspection_records WHERE id=?", [id])?;
+        if input.replace_existing {
+            for id in existing_ids.difference(&retained_ids) {
+                files_to_remove.extend(photo_paths_for_record(&tx, *id)?);
+                tx.execute("DELETE FROM inspection_records WHERE id=?", [id])?;
+            }
         }
         for record in input.records {
             if let Some(id) = record.id {
@@ -496,6 +502,24 @@ impl Database {
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(rows)
+    }
+
+    pub fn photo_inputs_for_record(&self, record_id: i64) -> Result<Vec<PhotoInput>> {
+        self.photos_for_record(record_id)?
+            .into_iter()
+            .map(|photo| {
+                let bytes = std::fs::read(&photo.file_path)?;
+                let name = Path::new(&photo.file_path)
+                    .file_name()
+                    .and_then(|value| value.to_str())
+                    .unwrap_or("photo.jpg")
+                    .to_string();
+                Ok(PhotoInput {
+                    name,
+                    data_base64: base64::engine::general_purpose::STANDARD.encode(bytes),
+                })
+            })
+            .collect()
     }
 
     fn photo_paths_for_batch(&self, batch_id: i64) -> Result<Vec<String>> {
@@ -763,6 +787,8 @@ mod tests {
         db.replace_carton_records(ReplaceCartonRecordsInput {
             batch_id,
             carton_id,
+            inspector: "测试员".into(),
+            replace_existing: true,
             records: vec![RecordEditInput {
                 id: Some(id),
                 barcode: "NEW".into(),

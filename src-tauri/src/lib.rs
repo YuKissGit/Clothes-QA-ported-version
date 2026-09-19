@@ -28,8 +28,27 @@ fn delete_batch(db: State<AppDb>, id: i64) -> Result<(), String> {
     result(db.lock().unwrap().delete_batch(id))
 }
 #[tauri::command]
-fn list_cartons(db: State<AppDb>, batch_id: i64) -> Result<Vec<Carton>, String> {
-    result(db.lock().unwrap().list_cartons(batch_id))
+fn list_brands(db: State<AppDb>, batch_id: i64) -> Result<Vec<Brand>, String> {
+    result(db.lock().unwrap().list_brands(batch_id))
+}
+#[tauri::command]
+fn create_brand(db: State<AppDb>, batch_id: i64, name: String) -> Result<i64, String> {
+    result(db.lock().unwrap().create_brand(batch_id, name))
+}
+#[tauri::command]
+fn rename_brand(db: State<AppDb>, id: i64, name: String) -> Result<(), String> {
+    result(db.lock().unwrap().rename_brand(id, name))
+}
+#[tauri::command]
+fn delete_brand(db: State<AppDb>, id: i64) -> Result<(), String> {
+    result(db.lock().unwrap().delete_brand(id))
+}
+#[tauri::command]
+fn list_cartons(db: State<AppDb>, batch_id: i64, brand_id: Option<i64>) -> Result<Vec<Carton>, String> {
+    result(match brand_id {
+        Some(id) => db.lock().unwrap().list_brand_cartons(batch_id, id),
+        None => db.lock().unwrap().list_cartons(batch_id),
+    })
 }
 #[tauri::command]
 fn list_carton_products(db: State<AppDb>, carton_id: i64) -> Result<Vec<CartonProduct>, String> {
@@ -39,9 +58,10 @@ fn list_carton_products(db: State<AppDb>, carton_id: i64) -> Result<Vec<CartonPr
 fn create_carton(
     db: State<AppDb>,
     batch_id: i64,
+    brand_id: i64,
     carton_no: String,
 ) -> Result<i64, String> {
-    result(db.lock().unwrap().create_carton(batch_id, carton_no))
+    result(db.lock().unwrap().create_carton_in_brand(batch_id, brand_id, carton_no))
 }
 #[tauri::command]
 fn rename_carton(db: State<AppDb>, id: i64, carton_no: String) -> Result<(), String> {
@@ -128,10 +148,10 @@ fn read_clipboard_file_image() -> Result<Option<PhotoInput>, String> {
     })())
 }
 #[tauri::command]
-fn import_cartons(db: State<AppDb>, batch_id: i64, path: String) -> Result<ImportResult, String> {
+fn import_cartons(db: State<AppDb>, batch_id: i64, brand_id: i64, path: String) -> Result<ImportResult, String> {
     result((|| {
         let rows = read_carton_import(std::path::Path::new(&path))?;
-        db.lock().unwrap().import_cartons(batch_id, rows)
+        db.lock().unwrap().import_cartons_to_brand(batch_id, brand_id, rows)
     })())
 }
 #[tauri::command]
@@ -151,6 +171,19 @@ fn export_batch(
         batch_id,
         PathBuf::from(output_dir),
         resource_dir,
+    ))
+}
+#[tauri::command]
+fn export_brand(
+    app: tauri::AppHandle,
+    db: State<AppDb>,
+    batch_id: i64,
+    brand_id: i64,
+    output_dir: String,
+) -> Result<Vec<String>, String> {
+    let resource_dir = app.path().resource_dir().map_err(|e| e.to_string())?;
+    result(export::export_brand(
+        &db.lock().unwrap(), batch_id, brand_id, PathBuf::from(output_dir), resource_dir,
     ))
 }
 
@@ -364,6 +397,10 @@ pub fn run() {
             list_batches,
             create_batch,
             delete_batch,
+            list_brands,
+            create_brand,
+            rename_brand,
+            delete_brand,
             list_cartons,
             list_carton_products,
             create_carton,
@@ -379,7 +416,8 @@ pub fn run() {
             read_clipboard_file_image,
             import_cartons,
             export_carton_template,
-            export_batch
+            export_batch,
+            export_brand
         ])
         .run(tauri::generate_context!())
         .expect("failed to run clothes QA application");

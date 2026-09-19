@@ -22,3 +22,15 @@
 .photo-lightbox-prev,.photo-lightbox-next { top: 50%; width: 48px; height: 48px; transform: translateY(-50%); }
 .photo-lightbox-prev { left: 22px; }
 .photo-lightbox-next { right: 22px; }
+.brand-grid { padding: 28px; display: grid; grid-template-columns: repeat(auto-fill,minmax(260px,1fr)); gap: 16px; }
+.brand-card { background: #fff; border: 1px solid #dce3de; border-radius: 12px; overflow: hidden; }
+.brand-card-main { width: 100%; min-height: 110px; border: 0; border-radius: 0; display: flex; flex-direction: column; align-items: flex-start; justify-content: center; gap: 9px; padding: 20px; text-align: left; }
+.brand-card-main strong { font-size: 19px; }
+.brand-card-main span { color: #65736b; }
+.brand-card-actions { display: flex; justify-content: flex-end; gap: 6px; padding: 9px 12px; border-top: 1px solid #e7ebe8; background: #fafbfa; }
+.brand-card-actions button { padding: 5px 9px; font-size: 12px; }
+.report-subtitle { margin-top: 18px; margin-bottom: 8px; }
+.report-subtitle h3 { margin: 0; }
+.brand-tabs { display: flex; gap: 8px; padding: 11px 28px; overflow-x: auto; background: #f8faf8; border-bottom: 1px solid #dfe5e0; scrollbar-width: thin; }
+.brand-tabs button { flex: 0 0 auto; white-space: nowrap; padding: 8px 16px; }
+.brand-tabs button.active { color: #fff; background: #176b46; border-color: #176b46; font-weight: 700; }

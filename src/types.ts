@@ -6,8 +6,18 @@ export interface Batch {
   inspectionDate: string;
 }
 
+export interface Brand {
+  id: number;
+  batchId: number;
+  name: string;
+  cartonCount: number;
+  completedCount: number;
+}
+
 export interface Carton {
   id: number;
+  brandId: number;
+  brandName: string;
   cartonNo: string;
   inspector: string;
   referenceQty: number | null;

@@ -22,12 +22,25 @@ pub fn export_batch(
     output_dir: PathBuf,
     resource_dir: PathBuf,
 ) -> Result<Vec<String>> {
-    if !db
-        .list_cartons(batch_id)?
-        .iter()
-        .any(|carton| carton.status == "completed")
-    {
-        anyhow::bail!("当前没有已完成的箱号可导出")
+    let mut files = Vec::new();
+    for brand in db.list_brands(batch_id)? {
+        if db.list_brand_cartons(batch_id, brand.id)?.iter().any(|carton| carton.status == "completed") {
+            files.extend(export_brand(db, batch_id, brand.id, output_dir.clone(), resource_dir.clone())?);
+        }
+    }
+    if files.is_empty() { anyhow::bail!("当前批次没有已完成的箱号可导出") }
+    Ok(files)
+}
+
+pub fn export_brand(
+    db: &Database,
+    batch_id: i64,
+    brand_id: i64,
+    output_dir: PathBuf,
+    resource_dir: PathBuf,
+) -> Result<Vec<String>> {
+    if !db.list_brand_cartons(batch_id, brand_id)?.iter().any(|carton| carton.status == "completed") {
+        anyhow::bail!("当前品牌没有已完成的箱号可导出")
     }
     fs::create_dir_all(&output_dir)?;
     let seal_template = find_template(&resource_dir, "template-2.xlsx")?;
@@ -37,15 +50,23 @@ pub fn export_batch(
         [batch_id],
         |r| Ok((r.get(0)?, r.get(1)?)),
     )?;
+    let brand_name: String = db.connection().query_row(
+        "SELECT name FROM brands WHERE id=? AND batch_id=?", [brand_id, batch_id], |r| r.get(0),
+    )?;
     let safe = date.replace('-', "");
-    let seal_out = output_dir.join(format!("封箱单 {} {}.xlsx", batch_no, safe));
-    let report_out = output_dir.join(format!("入库质检报告 {} {}.xlsx", batch_no, safe));
-    export_seal(db, batch_id, &seal_template, &seal_out)?;
-    export_report(db, batch_id, &report_template, &report_out)?;
+    let brand_safe = safe_filename(&brand_name);
+    let seal_out = output_dir.join(format!("封箱单 {} {} {}.xlsx", batch_no, brand_safe, safe));
+    let report_out = output_dir.join(format!("入库质检报告 {} {} {}.xlsx", batch_no, brand_safe, safe));
+    export_seal(db, batch_id, brand_id, &seal_template, &seal_out)?;
+    export_report(db, batch_id, brand_id, &report_template, &report_out)?;
     Ok(vec![
         seal_out.to_string_lossy().to_string(),
         report_out.to_string_lossy().to_string(),
     ])
+}
+
+fn safe_filename(value: &str) -> String {
+    value.chars().map(|c| if matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') { '_' } else { c }).collect()
 }
 
 #[cfg(test)]
@@ -218,6 +239,30 @@ mod tests {
         assert_eq!(grade_a.get_value("C2"), "DONE");
         assert_ne!(grade_a.get_value("C3"), "NOT-DONE");
     }
+
+    #[test]
+    fn batch_export_creates_two_files_for_each_brand() {
+        let root = std::env::temp_dir().join(format!("clothes-qa-export-brands-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut db = Database::open(root.join("test.db"), root.join("photos")).unwrap();
+        let batch_id = db.create_batch(BatchInput {
+            batch_no: "MULTI-BRAND".into(), inspection_date: "2026-09-18".into(),
+        }).unwrap();
+        for (name, carton_no) in [("始祖鸟", "001"), ("加拿大鹅", "001")] {
+            let brand_id = db.create_brand(batch_id, name.into()).unwrap();
+            let carton_id = db.create_carton_in_brand(batch_id, brand_id, carton_no.into()).unwrap();
+            db.create_record(RecordInput {
+                batch_id, carton_id, barcode: format!("{name}-UPC"), grade: "A".into(),
+                quantity: 1, exception_reason: "吊牌无价格".into(), photos: vec![],
+            }).unwrap();
+            db.complete_carton(carton_id).unwrap();
+        }
+        let resource_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().to_path_buf();
+        let files = export_batch(&db, batch_id, root.clone(), resource_dir).unwrap();
+        assert_eq!(files.len(), 4);
+        assert!(files.iter().any(|path| path.contains("始祖鸟")));
+        assert!(files.iter().any(|path| path.contains("加拿大鹅")));
+    }
 }
 
 fn find_template(resource_dir: &Path, name: &str) -> Result<PathBuf> {
@@ -232,10 +277,10 @@ fn find_template(resource_dir: &Path, name: &str) -> Result<PathBuf> {
         .with_context(|| format!("Export template not found: {name}"))
 }
 
-fn export_seal(db: &Database, batch_id: i64, template: &Path, out: &Path) -> Result<()> {
+fn export_seal(db: &Database, batch_id: i64, brand_id: i64, template: &Path, out: &Path) -> Result<()> {
     let mut book = reader::xlsx::read(template)?;
     let cartons: Vec<_> = db
-        .list_cartons(batch_id)?
+        .list_brand_cartons(batch_id, brand_id)?
         .into_iter()
         .filter(|carton| carton.status == "completed")
         .collect();
@@ -360,11 +405,11 @@ fn export_seal(db: &Database, batch_id: i64, template: &Path, out: &Path) -> Res
     Ok(())
 }
 
-fn export_report(db: &Database, batch_id: i64, template: &Path, out: &Path) -> Result<()> {
+fn export_report(db: &Database, batch_id: i64, brand_id: i64, template: &Path, out: &Path) -> Result<()> {
     let mut book = reader::xlsx::read(template)?;
     let _ = book.remove_sheet_by_name("质检报告");
     let completed_carton_ids: HashSet<_> = db
-        .list_cartons(batch_id)?
+        .list_brand_cartons(batch_id, brand_id)?
         .into_iter()
         .filter(|carton| carton.status == "completed")
         .map(|carton| carton.id)

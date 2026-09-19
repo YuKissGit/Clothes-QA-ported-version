@@ -23,14 +23,21 @@ impl Database {
                batch_no TEXT NOT NULL UNIQUE,
                inspection_date TEXT NOT NULL
              );
+             CREATE TABLE IF NOT EXISTS brands(
+               id INTEGER PRIMARY KEY,
+               batch_id INTEGER NOT NULL REFERENCES batches(id) ON DELETE CASCADE,
+               name TEXT NOT NULL,
+               UNIQUE(batch_id,name)
+             );
              CREATE TABLE IF NOT EXISTS cartons(
                id INTEGER PRIMARY KEY,
                batch_id INTEGER NOT NULL REFERENCES batches(id) ON DELETE CASCADE,
+               brand_id INTEGER NOT NULL REFERENCES brands(id) ON DELETE CASCADE,
                carton_no TEXT NOT NULL,
                inspector TEXT NOT NULL DEFAULT '',
                reference_qty INTEGER CHECK(reference_qty>0),
                status TEXT NOT NULL DEFAULT 'inspecting',
-               UNIQUE(batch_id,carton_no)
+               UNIQUE(brand_id,carton_no)
              );
              CREATE TABLE IF NOT EXISTS carton_products(
                id INTEGER PRIMARY KEY,
@@ -72,6 +79,7 @@ impl Database {
             "inspector",
             "TEXT NOT NULL DEFAULT ''",
         )?;
+        migrate_brands(&conn)?;
         Ok(Self { conn, photo_dir })
     }
 
@@ -112,13 +120,88 @@ impl Database {
         Ok(())
     }
 
+    pub fn list_brands(&self, batch_id: i64) -> Result<Vec<Brand>> {
+        let mut statement = self.conn.prepare(
+            "SELECT b.id,b.batch_id,b.name,COUNT(c.id),
+                    COALESCE(SUM(CASE WHEN c.status='completed' THEN 1 ELSE 0 END),0)
+             FROM brands b LEFT JOIN cartons c ON c.brand_id=b.id
+             WHERE b.batch_id=? GROUP BY b.id ORDER BY b.id",
+        )?;
+        let rows = statement
+            .query_map([batch_id], |row| {
+                Ok(Brand {
+                    id: row.get(0)?,
+                    batch_id: row.get(1)?,
+                    name: row.get(2)?,
+                    carton_count: row.get(3)?,
+                    completed_count: row.get(4)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    pub fn create_brand(&mut self, batch_id: i64, name: String) -> Result<i64> {
+        if name.trim().is_empty() {
+            bail!("品牌名称不能为空")
+        }
+        self.conn.execute(
+            "INSERT INTO brands(batch_id,name) VALUES(?,?)",
+            params![batch_id, name.trim()],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    pub fn rename_brand(&mut self, id: i64, name: String) -> Result<()> {
+        if name.trim().is_empty() {
+            bail!("品牌名称不能为空")
+        }
+        if self.conn.execute("UPDATE brands SET name=? WHERE id=?", params![name.trim(), id])? == 0 {
+            bail!("未找到该品牌")
+        }
+        Ok(())
+    }
+
+    pub fn delete_brand(&mut self, id: i64) -> Result<()> {
+        let mut statement = self.conn.prepare(
+            "SELECT p.file_path FROM photos p
+             JOIN inspection_records r ON r.id=p.record_id
+             JOIN cartons c ON c.id=r.carton_id WHERE c.brand_id=?",
+        )?;
+        let paths = statement.query_map([id], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        drop(statement);
+        if self.conn.execute("DELETE FROM brands WHERE id=?", [id])? == 0 {
+            bail!("未找到该品牌")
+        }
+        remove_photo_files(paths);
+        Ok(())
+    }
+
+    fn default_brand_id(&mut self, batch_id: i64) -> Result<i64> {
+        self.conn.execute(
+            "INSERT OR IGNORE INTO brands(batch_id,name) VALUES(?,'默认品牌')",
+            [batch_id],
+        )?;
+        Ok(self.conn.query_row(
+            "SELECT id FROM brands WHERE batch_id=? AND name='默认品牌'",
+            [batch_id], |row| row.get(0),
+        )?)
+    }
+
     pub fn create_carton(&mut self, batch_id: i64, carton_no: String) -> Result<i64> {
+        let brand_id = self.default_brand_id(batch_id)?;
+        self.create_carton_in_brand(batch_id, brand_id, carton_no)
+    }
+
+    pub fn create_carton_in_brand(&mut self, batch_id: i64, brand_id: i64, carton_no: String) -> Result<i64> {
         if carton_no.trim().is_empty() {
             bail!("Carton number is required")
         }
+        ensure_brand(&self.conn, batch_id, brand_id)?;
         self.conn.execute(
-            "INSERT INTO cartons(batch_id,carton_no) VALUES(?,?)",
-            params![batch_id, carton_no.trim()],
+            "INSERT INTO cartons(batch_id,brand_id,carton_no) VALUES(?,?,?)",
+            params![batch_id, brand_id, carton_no.trim()],
         )?;
         Ok(self.conn.last_insert_rowid())
     }
@@ -167,8 +250,16 @@ impl Database {
     }
 
     pub fn list_cartons(&self, batch_id: i64) -> Result<Vec<Carton>> {
+        self.list_cartons_scoped(batch_id, None)
+    }
+
+    pub fn list_brand_cartons(&self, batch_id: i64, brand_id: i64) -> Result<Vec<Carton>> {
+        self.list_cartons_scoped(batch_id, Some(brand_id))
+    }
+
+    fn list_cartons_scoped(&self, batch_id: i64, brand_id: Option<i64>) -> Result<Vec<Carton>> {
         let mut statement = self.conn.prepare(
-            "SELECT c.id,c.carton_no,c.inspector,c.reference_qty,
+            "SELECT c.id,c.brand_id,b.name,c.carton_no,c.inspector,c.reference_qty,
                     COALESCE(SUM(r.quantity),0),
                     COALESCE(SUM(CASE WHEN r.grade='A' THEN r.quantity ELSE 0 END),0),
                     COALESCE(SUM(CASE WHEN r.grade='B' THEN r.quantity ELSE 0 END),0),
@@ -176,27 +267,30 @@ impl Database {
                     COALESCE(SUM(CASE WHEN r.grade='D' THEN r.quantity ELSE 0 END),0),
                     c.status
              FROM cartons c
+             JOIN brands b ON b.id=c.brand_id
              LEFT JOIN inspection_records r ON r.carton_id=c.id
-             WHERE c.batch_id=?
+             WHERE c.batch_id=? AND (? IS NULL OR c.brand_id=?)
              GROUP BY c.id
              ORDER BY CAST(c.carton_no AS INTEGER),c.carton_no",
         )?;
         let rows = statement
-            .query_map([batch_id], |row| {
-                let inspected: i64 = row.get(4)?;
-                let grade_d: i64 = row.get(8)?;
+            .query_map(params![batch_id, brand_id, brand_id], |row| {
+                let inspected: i64 = row.get(6)?;
+                let grade_d: i64 = row.get(10)?;
                 Ok(Carton {
                     id: row.get(0)?,
-                    carton_no: row.get(1)?,
-                    inspector: row.get(2)?,
-                    reference_qty: row.get(3)?,
+                    brand_id: row.get(1)?,
+                    brand_name: row.get(2)?,
+                    carton_no: row.get(3)?,
+                    inspector: row.get(4)?,
+                    reference_qty: row.get(5)?,
                     inspected_qty: inspected,
-                    grade_a: row.get(5)?,
-                    grade_b: row.get(6)?,
-                    grade_c: row.get(7)?,
+                    grade_a: row.get(7)?,
+                    grade_b: row.get(8)?,
+                    grade_c: row.get(9)?,
                     grade_d,
                     sealed_qty: inspected - grade_d,
-                    status: row.get(9)?,
+                    status: row.get(11)?,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -409,9 +503,20 @@ impl Database {
         batch_id: i64,
         rows: Vec<CartonProductImport>,
     ) -> Result<ImportResult> {
+        let brand_id = self.default_brand_id(batch_id)?;
+        self.import_cartons_to_brand(batch_id, brand_id, rows)
+    }
+
+    pub fn import_cartons_to_brand(
+        &mut self,
+        batch_id: i64,
+        brand_id: i64,
+        rows: Vec<CartonProductImport>,
+    ) -> Result<ImportResult> {
         if rows.is_empty() {
             bail!("The import file contains no valid carton data")
         }
+        ensure_brand(&self.conn, batch_id, brand_id)?;
         let tx = self.conn.transaction()?;
         let mut created = 0;
         let mut skipped = 0;
@@ -432,8 +537,8 @@ impl Database {
         for (carton_no, products) in &cartons {
             let existing = tx
                 .query_row(
-                    "SELECT id FROM cartons WHERE batch_id=? AND carton_no=?",
-                    params![batch_id, carton_no],
+                    "SELECT id FROM cartons WHERE brand_id=? AND carton_no=?",
+                    params![brand_id, carton_no],
                     |row| row.get::<_, i64>(0),
                 )
                 .optional()?;
@@ -442,8 +547,8 @@ impl Database {
                 continue;
             }
             tx.execute(
-                "INSERT INTO cartons(batch_id,carton_no) VALUES(?,?)",
-                params![batch_id, carton_no],
+                "INSERT INTO cartons(batch_id,brand_id,carton_no) VALUES(?,?,?)",
+                params![batch_id, brand_id, carton_no],
             )?;
             created += 1;
             let carton_id = tx.last_insert_rowid();
@@ -566,6 +671,63 @@ fn add_column_if_missing(
     Ok(())
 }
 
+fn migrate_brands(conn: &Connection) -> Result<()> {
+    let has_brand_id = conn
+        .prepare("PRAGMA table_info(cartons)")?
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<rusqlite::Result<Vec<_>>>()?
+        .iter()
+        .any(|name| name == "brand_id");
+    if has_brand_id {
+        return Ok(())
+    }
+    conn.execute_batch(
+        "INSERT OR IGNORE INTO brands(batch_id,name)
+           SELECT id,'默认品牌' FROM batches;
+         PRAGMA foreign_keys=OFF;
+         BEGIN IMMEDIATE;
+         CREATE TABLE cartons_v3(
+           id INTEGER PRIMARY KEY,
+           batch_id INTEGER NOT NULL REFERENCES batches(id) ON DELETE CASCADE,
+           brand_id INTEGER NOT NULL REFERENCES brands(id) ON DELETE CASCADE,
+           carton_no TEXT NOT NULL,
+           inspector TEXT NOT NULL DEFAULT '',
+           reference_qty INTEGER CHECK(reference_qty>0),
+           status TEXT NOT NULL DEFAULT 'inspecting',
+           UNIQUE(brand_id,carton_no)
+         );
+         INSERT INTO cartons_v3(id,batch_id,brand_id,carton_no,inspector,reference_qty,status)
+           SELECT c.id,c.batch_id,b.id,c.carton_no,c.inspector,c.reference_qty,c.status
+           FROM cartons c JOIN brands b ON b.batch_id=c.batch_id AND b.name='默认品牌';
+         DROP TABLE cartons;
+         ALTER TABLE cartons_v3 RENAME TO cartons;
+         COMMIT;
+         PRAGMA foreign_keys=ON;",
+    )?;
+    let violation: Option<String> = conn
+        .query_row("PRAGMA foreign_key_check", [], |row| row.get(0))
+        .optional()?;
+    if let Some(table) = violation {
+        bail!("品牌数据迁移后外键检查失败：{table}")
+    }
+    Ok(())
+}
+
+fn ensure_brand(conn: &Connection, batch_id: i64, brand_id: i64) -> Result<()> {
+    let exists = conn
+        .query_row(
+            "SELECT 1 FROM brands WHERE id=? AND batch_id=?",
+            params![brand_id, batch_id],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some();
+    if !exists {
+        bail!("品牌不属于当前批次")
+    }
+    Ok(())
+}
+
 fn validate_record(
     barcode: &str,
     grade: &str,
@@ -663,6 +825,42 @@ mod tests {
             inspection_date: "2026-07-16".into(),
         })
         .unwrap()
+    }
+
+    #[test]
+    fn migrates_existing_cartons_into_default_brand() {
+        let root = std::env::temp_dir().join(format!("clothes-qa-migration-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("test.db");
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE batches(id INTEGER PRIMARY KEY,batch_no TEXT NOT NULL UNIQUE,inspection_date TEXT NOT NULL);
+             CREATE TABLE cartons(id INTEGER PRIMARY KEY,batch_id INTEGER NOT NULL REFERENCES batches(id) ON DELETE CASCADE,carton_no TEXT NOT NULL,inspector TEXT NOT NULL DEFAULT '',reference_qty INTEGER,status TEXT NOT NULL DEFAULT 'inspecting',UNIQUE(batch_id,carton_no));
+             INSERT INTO batches VALUES(1,'OLD','2026-09-18');
+             INSERT INTO cartons VALUES(9,1,'001','张三',10,'completed');",
+        ).unwrap();
+        drop(conn);
+        let db = Database::open(path, root.join("photos")).unwrap();
+        let brands = db.list_brands(1).unwrap();
+        assert_eq!(brands.len(), 1);
+        assert_eq!(brands[0].name, "默认品牌");
+        let cartons = db.list_brand_cartons(1, brands[0].id).unwrap();
+        assert_eq!(cartons[0].id, 9);
+        assert_eq!(cartons[0].carton_no, "001");
+        assert_eq!(cartons[0].inspector, "张三");
+    }
+
+    #[test]
+    fn brands_isolate_duplicate_carton_numbers() {
+        let mut db = setup();
+        let batch_id = batch(&mut db);
+        let first = db.create_brand(batch_id, "始祖鸟".into()).unwrap();
+        let second = db.create_brand(batch_id, "加拿大鹅".into()).unwrap();
+        db.create_carton_in_brand(batch_id, first, "001".into()).unwrap();
+        db.create_carton_in_brand(batch_id, second, "001".into()).unwrap();
+        assert_eq!(db.list_brand_cartons(batch_id, first).unwrap().len(), 1);
+        assert_eq!(db.list_brand_cartons(batch_id, second).unwrap().len(), 1);
+        assert_eq!(db.list_cartons(batch_id).unwrap().len(), 2);
     }
 
     fn input(

@@ -17,8 +17,20 @@ pub struct BatchInput {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct Brand {
+    pub id: i64,
+    pub batch_id: i64,
+    pub name: String,
+    pub carton_count: i64,
+    pub completed_count: i64,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Carton {
     pub id: i64,
+    pub brand_id: i64,
+    pub brand_name: String,
     pub carton_no: String,
     pub inspector: String,
     pub reference_qty: Option<i64>,

@@ -19,6 +19,19 @@ const emptyBatch = {
   inspectionDate: new Date().toISOString().slice(0, 10),
 };
 
+function BrandLabel({ brand }: { brand: Brand }) {
+  return (
+    <>
+      {brand.name} : <span className="brand-unit-count">{brand.totalUnits.toLocaleString("en-US")}</span>
+      {brand.missingTotalUnitsCount > 0 && (
+        <small className="brand-unit-missing" title={`未完成箱中有 ${brand.missingTotalUnitsCount} 条商品数据未填写总数量，当前仅合计已知数量；已完成箱按实际质检数量合计`}>
+          （部分数量缺失）
+        </small>
+      )}
+    </>
+  );
+}
+
 function App() {
   const [batches, setBatches] = useState<Batch[]>([]);
   const [batch, setBatch] = useState<Batch | null>(null);
@@ -212,7 +225,7 @@ function App() {
                 setProducts([]);
                 setCartons(await api.listCartons(batch.id, item.id));
               }}>
-                <strong>{item.name}</strong>
+                <strong><BrandLabel brand={item} /></strong>
                 <span>{item.cartonCount} 箱 · 已完成 {item.completedCount} 箱</span>
               </button>
               <div className="brand-card-actions">
@@ -352,7 +365,7 @@ function App() {
               }
             }}
           >
-            {item.name}
+            <BrandLabel brand={item} />
           </button>
         ))}
       </nav>

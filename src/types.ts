@@ -12,6 +12,8 @@ export interface Brand {
   name: string;
   cartonCount: number;
   completedCount: number;
+  totalUnits: number;
+  missingTotalUnitsCount: number;
 }
 
 export interface Carton {

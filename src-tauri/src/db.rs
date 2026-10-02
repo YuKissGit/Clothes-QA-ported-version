@@ -123,7 +123,16 @@ impl Database {
     pub fn list_brands(&self, batch_id: i64) -> Result<Vec<Brand>> {
         let mut statement = self.conn.prepare(
             "SELECT b.id,b.batch_id,b.name,COUNT(c.id),
-                    COALESCE(SUM(CASE WHEN c.status='completed' THEN 1 ELSE 0 END),0)
+                    COALESCE(SUM(CASE WHEN c.status='completed' THEN 1 ELSE 0 END),0),
+                    (SELECT COALESCE(SUM(p.total_units),0)
+                     FROM carton_products p JOIN cartons pc ON pc.id=p.carton_id
+                     WHERE pc.brand_id=b.id AND pc.status<>'completed') +
+                    (SELECT COALESCE(SUM(r.quantity),0)
+                     FROM inspection_records r JOIN cartons rc ON rc.id=r.carton_id
+                     WHERE rc.brand_id=b.id AND rc.status='completed'),
+                    (SELECT COUNT(*)
+                     FROM carton_products p JOIN cartons pc ON pc.id=p.carton_id
+                     WHERE pc.brand_id=b.id AND pc.status<>'completed' AND p.total_units IS NULL)
              FROM brands b LEFT JOIN cartons c ON c.brand_id=b.id
              WHERE b.batch_id=? GROUP BY b.id ORDER BY b.id",
         )?;
@@ -135,6 +144,8 @@ impl Database {
                     name: row.get(2)?,
                     carton_count: row.get(3)?,
                     completed_count: row.get(4)?,
+                    total_units: row.get(5)?,
+                    missing_total_units_count: row.get(6)?,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -910,6 +921,50 @@ mod tests {
             .unwrap();
         let carton = db.list_cartons(batch_id).unwrap().remove(0);
         assert_eq!((carton.grade_b, carton.grade_d, carton.sealed_qty), (3, 1, 3));
+    }
+
+    #[test]
+    fn brand_total_units_use_actual_for_completed_and_imported_for_unfinished() {
+        let mut db = setup();
+        let batch_id = batch(&mut db);
+        let brand_id = db.create_brand(batch_id, "NIKE".into()).unwrap();
+        let other = db.create_brand(batch_id, "OTHER".into()).unwrap();
+        let other_batch = batch(&mut db);
+        let other_batch_brand = db.create_brand(other_batch, "NIKE".into()).unwrap();
+        let mut first = imported("001", "a", 2);
+        first.total_units = Some(12000);
+        let mut second = imported("001", "b", 3);
+        second.total_units = Some(500);
+        let mut third = imported("002", "c", 4);
+        third.total_units = Some(80);
+        db.import_cartons_to_brand(batch_id, other, vec![first.clone()]).unwrap();
+        db.import_cartons_to_brand(other_batch, other_batch_brand, vec![first.clone()]).unwrap();
+        db.import_cartons_to_brand(batch_id, brand_id, vec![first, second, third, imported("002", "d", 1)]).unwrap();
+        let carton_id = db.list_brand_cartons(batch_id, brand_id).unwrap()[0].id;
+        for (grade, quantity) in [("A", 10), ("B", 20), ("C", 30), ("D", 40)] {
+            db.create_record(input(batch_id, carton_id, "a", grade, quantity)).unwrap();
+        }
+        let unfinished_id = db.list_brand_cartons(batch_id, brand_id).unwrap()[1].id;
+        db.create_record(input(batch_id, unfinished_id, "c", "A", 7)).unwrap();
+        assert_eq!(db.list_brands(batch_id).unwrap().iter().find(|b| b.id == brand_id).unwrap().total_units, 12580);
+        db.conn.execute("UPDATE cartons SET status='completed' WHERE id=?", [carton_id]).unwrap();
+        let brands = db.list_brands(batch_id).unwrap();
+        let brand = brands.iter().find(|b| b.id == brand_id).unwrap();
+        assert_eq!(brand.total_units, 180);
+        assert_eq!(brand.missing_total_units_count, 1);
+        assert_eq!((brand.carton_count, brand.completed_count), (2, 1));
+        db.conn.execute("UPDATE cartons SET status='completed' WHERE id=?", [unfinished_id]).unwrap();
+        let brands = db.list_brands(batch_id).unwrap();
+        let brand = brands.iter().find(|b| b.id == brand_id).unwrap();
+        assert_eq!((brand.total_units, brand.missing_total_units_count), (107, 0));
+        db.conn.execute("UPDATE cartons SET status='inspecting' WHERE id=?", [carton_id]).unwrap();
+        assert_eq!(db.list_brands(batch_id).unwrap().iter().find(|b| b.id == brand_id).unwrap().total_units, 12507);
+        for carton in db.list_brand_cartons(batch_id, brand_id).unwrap() {
+            db.delete_carton(carton.id).unwrap();
+        }
+        let brands = db.list_brands(batch_id).unwrap();
+        let brand = brands.iter().find(|b| b.id == brand_id).unwrap();
+        assert_eq!((brand.total_units, brand.missing_total_units_count, brand.carton_count), (0, 0, 0));
     }
 
     #[test]

@@ -23,6 +23,8 @@ pub struct Brand {
     pub name: String,
     pub carton_count: i64,
     pub completed_count: i64,
+    pub total_units: i64,
+    pub missing_total_units_count: i64,
 }
 
 #[derive(Debug, Serialize)]
